@@ -44,7 +44,10 @@ def fit_model_nonzero(df_cur, d, q, epochs_p, b_p):
     df = df_cur[df_cur[f"PayCum{d:02}"].notna() &
                 df_cur[f"PayCum{d + 1:02}"].notna() &
                 df_cur[f"PayCum{d:02}"] > 0]
-    dat_x = df[['LoB', 'cc', 'AQ', 'age', 'inj_part']]
+
+    features_list = [x for x in df_cur.columns if 'Pay' not in x and x != 'AY']
+
+    dat_x = df[features_list]
     dat_c0 = df[f"PayCum{d:02}"]
     dat_c1 = df[f"PayCum{d + 1:02}"]
     dat_y = dat_c1 / np.sqrt(dat_c0)
@@ -73,6 +76,10 @@ def fit_model_nonzero(df_cur, d, q, epochs_p, b_p):
     return model
 
 
+def minmax_scaler(x):
+    return 2 * ((x - x.min())/(x.max() - x.min())) - 1
+
+
 def read_data_set():
     df_t = pd.read_csv('dane.csv', sep=';', index_col=False)
     df_t.drop(['Unnamed: 0', 'ClNr', 'RepDel'], axis=1, inplace=True)
@@ -88,6 +95,9 @@ def read_data_set():
             .groupby(['LoB', 'cc', 'AY', 'AQ', 'age', 'inj_part'])
             .sum()
             .reset_index())
+
+    df_t[['AQ', 'age']] = df_t[['AQ', 'age']].apply(minmax_scaler, axis=0)
+    df_t = pd.get_dummies(df_t, columns=['LoB', 'cc', 'inj_part'])
 
     # removing strange data in the data sets - where payments are negative
     # to further consideration
@@ -111,20 +121,21 @@ for i in range(dev_length):
 
 models = [fit_model_nonzero(df_cur=df_train,
                             d=x,
-                            q=30,
-                            epochs_p=100,
+                            q=300,
+                            epochs_p=40,
                             b_p=1000) for x in range(dev_length - 1)]
 models_zero = [
     fit_model_zero(df_train, hist_start + x)
     for x in range(hist_end - hist_start + 1)
 ]
 
+features_list = [x for x in df_train.columns if 'Pay' not in x and x != 'AY']
 df_nonzero_predict = df_train.copy()
 
 for j in range(dev_length - 1):
     ind_to_update = df_nonzero_predict[f"PayCum{j + 1:02}"].isna()
     df_temp = df_nonzero_predict[ind_to_update]
-    dat_x = df_temp[['LoB', 'cc', 'AQ', 'age', 'inj_part']]
+    dat_x = df_temp[features_list]
     dat_c0 = df_temp[f"PayCum{j:02}"]
 #    print(dat_c0.describe())
     dat_w = np.sqrt(dat_c0)
