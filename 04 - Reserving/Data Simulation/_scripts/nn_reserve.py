@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 # import matplotlib.pyplot as plt
-from tensorflow.keras import Model, backend, initializers
+from tensorflow.keras import Model, backend, initializers, regularizers
 from tensorflow.keras.layers import Dense, Input, Multiply
 
 
@@ -14,6 +14,16 @@ def fit_cl(tr, dev_length, hist_start):
                    f"PayCum{i:02}"].sum()
         f.append(b/a)
     return f
+
+
+def fit_and_predict_cl(df, dev_length, hist_start, hist_end):
+    df = df.set_index('AY')
+    model_cl = fit_cl(df, dev_length, hist_start)
+    for i in range(dev_length - 1):
+        curr_range = range(hist_end - i, hist_end + 1)
+        basic = df.loc[curr_range, f"PayCum{i:02}"]
+        df.loc[curr_range, f"PayCum{i + 1:02}"] = basic * model_cl[i]
+    return df
 
 
 def fit_model_zero(df_cur, ay):
@@ -38,7 +48,7 @@ def fit_model_zero(df_cur, ay):
     return np.concatenate((np.zeros(hist_end - ay + 1), np.cumprod(g)))
 
 
-def fit_model_nonzero(df_cur, d, q, epochs_p, b_p):
+def fit_model_nonzero(df_cur, d, q, epochs_p, b_p, k_r):
     # extracting only data points that are in training set
     # and relevant for neural network
     df = df_cur[df_cur[f"PayCum{d:02}"].notna() &
@@ -52,10 +62,15 @@ def fit_model_nonzero(df_cur, d, q, epochs_p, b_p):
     dat_c1 = df[f"PayCum{d + 1:02}"]
     dat_y = dat_c1 / np.sqrt(dat_c0)
     dat_w = np.sqrt(dat_c0)
+    cl_df = np.log(dat_c1.sum() / dat_c0.sum())
 
     features = Input(shape=dat_x.shape[1])
     hidden_layer = Dense(units=q, activation='tanh')(features)
-    output_layer = Dense(units=1, activation=backend.exp)(hidden_layer)
+    output_layer = Dense(units=1, activation=backend.exp,
+                         bias_initializer=initializers.Constant(value=cl_df),
+                         kernel_initializer=initializers.Zeros(),
+                         kernel_regularizer=k_r
+                         )(hidden_layer)
 
     volumes = Input(shape=1)
     offset_layer = Dense(units=1, activation='linear',
@@ -96,14 +111,11 @@ def read_data_set():
             .sum()
             .reset_index())
 
+    # Features preprocessing
     df_t[['AQ', 'age']] = df_t[['AQ', 'age']].apply(minmax_scaler, axis=0)
     df_t = pd.get_dummies(df_t, columns=['LoB', 'cc', 'inj_part'])
 
-    # removing strange data in the data sets - where payments are negative
-    # to further consideration
-    ew = (df_t[[f"Pay{j:02}" for j in range(dev_length)]].min(axis=1) >= 0)
-
-    return df_t[ew]
+    return df_t
 
 
 dev_length = 12
@@ -119,17 +131,23 @@ for i in range(dev_length):
 
 ###############################
 
-models = [fit_model_nonzero(df_cur=df_train,
-                            d=x,
-                            q=300,
-                            epochs_p=40,
-                            b_p=1000) for x in range(dev_length - 1)]
+models = [
+    fit_model_nonzero(df_cur=df_train,
+                      d=x,
+                      q=20,
+                      epochs_p=20,
+                      b_p=5000,
+                      k_r=None)  # regularizers.l1_l2(l1=10, l2=10))
+    for x in range(dev_length - 1)
+]
+
 models_zero = [
     fit_model_zero(df_train, hist_start + x)
     for x in range(hist_end - hist_start + 1)
 ]
 
 features_list = [x for x in df_train.columns if 'Pay' not in x and x != 'AY']
+extract_columns = ['AY'] + [f"PayCum{j:02}" for j in range(dev_length)]
 df_nonzero_predict = df_train.copy()
 
 for j in range(dev_length - 1):
@@ -137,40 +155,50 @@ for j in range(dev_length - 1):
     df_temp = df_nonzero_predict[ind_to_update]
     dat_x = df_temp[features_list]
     dat_c0 = df_temp[f"PayCum{j:02}"]
-#    print(dat_c0.describe())
     dat_w = np.sqrt(dat_c0)
     new_predicted = \
         models[j].predict([dat_x, dat_w]).flatten() * np.sqrt(dat_c0)
-#    print((new_predicted - dat_c0).describe())
     df_nonzero_predict.loc[ind_to_update, f"PayCum{j + 1:02}"] = new_predicted
 
+tr_non_zero_predict = df_nonzero_predict[extract_columns].groupby('AY').sum()
 
-extract_columns = ['AY'] + [f"PayCum{j:02}" for j in range(dev_length)]
+
 tr_0 = df_0[extract_columns].groupby('AY').sum()
 tr_0_diag = np.diag(np.fliplr(tr_0))
 models_zero_predict = tr_0_diag.reshape((-1, 1)) * models_zero
 
-####
-
-tr_non_zero_predict = df_nonzero_predict[extract_columns].groupby('AY').sum()
 tr_predict = tr_non_zero_predict + models_zero_predict
 
-####
+################
 
-model_cl = fit_cl(tr_0, dev_length, hist_start)
+df_0_cl = df_0[extract_columns].copy()
+df_0_cl['LoB'] = df_0[[x for x in df_0.columns if 'LoB' in x]].idxmax(axis=1)
+tr_0_cl = df_0_cl.groupby(['LoB', 'AY']).sum().reset_index()
 
-tr_cl_predict = tr_0.copy()
-for i in range(dev_length - 1):
-    curr_range = range(hist_end - i, hist_end + 1)
-    basic = tr_cl_predict.loc[curr_range, f"PayCum{i:02}"]
-    tr_cl_predict.loc[curr_range, f"PayCum{i + 1:02}"] = basic * model_cl[i]
+# Predict Chain Ladder without split into LoBs
+tr_cl_predict = fit_and_predict_cl(
+    df=tr_0_cl.copy().groupby('AY').sum().reset_index(),
+    dev_length=dev_length,
+    hist_start=hist_start,
+    hist_end=hist_end
+)
 
-####
+# Predict Chain Ladder with split into LoBs
+tr_lob_cl_predict = (
+    tr_0_cl.copy().groupby('LoB').apply(fit_and_predict_cl,
+                                        dev_length=dev_length,
+                                        hist_start=hist_start,
+                                        hist_end=hist_end)
+)
 
+
+# Print results
+tr_lob_cl_predict.to_csv('tr_lob_CL_predict.csv', sep=';', decimal=',')
 tr_cl_predict.to_csv('tr_CL_predict.csv', sep=';', decimal=',')
 tr_predict.to_csv('tr_predict.csv', sep=';', decimal=',')
 tr_0.to_csv('tr_0.csv', sep=';', decimal=',')
 
+print(tr_lob_cl_predict[['PayCum11']].sum())
 print(tr_cl_predict[['PayCum11']].sum())
 print(tr_predict[['PayCum11']].sum())
 print(tr_0[['PayCum11']].sum())
