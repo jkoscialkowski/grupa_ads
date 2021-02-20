@@ -90,7 +90,7 @@ def predict_cl(triangle, development_length):
             triangle.iloc[development_length - 1 - j, j] * accumulated_factor
         )
 
-    return pd.Series(outstanding_claims[::-1], triangle.index)
+    return pd.Series(outstanding_claims[::-1], triangle.index), f_list
 
 
 def preprocess_data(df):
@@ -231,14 +231,14 @@ def fit_model_zero(df, ay):
     for m in range(remain - 1):
         a = df_star[labels[m + 1]].sum()
         if m == 0:
-            b = df[labels[0]].sum()
+            b = df_curr_ay[labels[0]].sum()
         else:
             b = df_star[labels[m]].sum()
         g.append(a / b if b > 0 else 1)
         # narrowing down the data set, in line with formulas in the paper
         df_star = df_star[df_star['AY'] < ay - m - 1]
 
-    return np.prod(g if g != [] else 0)
+    return np.prod(g if g != [] else 0), g
 
 
 def predict_zero_model(df, development_length, lob, model):
@@ -268,10 +268,36 @@ def plot_by_variable(ret, variable, relative=False):
 @click.command()
 @click.option("--per-batch-preproc", is_flag=True)
 @click.option("--initialize-cl", is_flag=True)
+@click.option("--present-charts", is_flag=True)
+@click.option("--clear-zero", is_flag=True)
+@click.option("--shuffle-ays", is_flag=True)
+@click.option("--transform-portfolio-in-time", is_flag=True)
 @click.argument("path")
-def main(per_batch_preproc, initialize_cl, path):
+def main(per_batch_preproc, initialize_cl, path,
+         present_charts, clear_zero, shuffle_ays, transform_portfolio_in_time):
+
     click.echo("Reading data...")
     df, development_length = read_data(path)
+
+    if clear_zero:
+        df = df[df['Pay00'] > 0]
+
+    if shuffle_ays:
+        keys = df['AY'].unique()
+        values = keys.copy()
+        np.random.seed(0)
+        np.random.shuffle(values)
+        ay_dict = dict(zip(keys, values))
+        df['AY'].replace(ay_dict, inplace=True)
+
+    if transform_portfolio_in_time:
+        np.random.seed(0)
+        var_weight = df['AQ'] <= 2
+        df['weights'] = ((df['AY'] <= 2003) * (0.2 + (0.8 * var_weight))) + \
+                        ((df['AY'] > 2003) * (0.2 + (0.8 * (1 - var_weight))))
+        df['choose'] = 1 * (df['weights'] > np.random.random(len(df)))
+        df = df[df['choose'] == 1]
+
     ret = pd.DataFrame(df[EXPLANATORY_COLUMNS + ['AY']])
     ay_max = df.AY.max()
 
@@ -281,7 +307,8 @@ def main(per_batch_preproc, initialize_cl, path):
         current_triangle = compute_triangle(
             df[df.LoB == lob], development_length
         )
-        current_cl_result = predict_cl(current_triangle, development_length)
+        current_cl_result, current_df = predict_cl(current_triangle,
+                                                   development_length)
         current_triangle.loc[:, 'CL'] = current_cl_result
         lob_triangles.append(current_triangle)
 
@@ -289,7 +316,8 @@ def main(per_batch_preproc, initialize_cl, path):
     for lob in range(1, df.LoB.max() + 1):
         models_zero_current_lob = []
         for accident_year in range(df.AY.min(), df.AY.max() + 1):
-            current_model = fit_model_zero(df[df.LoB == lob], accident_year)
+            current_model, current_df_zero = fit_model_zero(df[df.LoB == lob],
+                                                            accident_year)
             models_zero_current_lob.append(current_model)
         current_zero_pred = predict_zero_model(df, development_length,
                                                lob, models_zero_current_lob)
@@ -343,8 +371,15 @@ def main(per_batch_preproc, initialize_cl, path):
         ret_current_lob = ret.loc[ret.LoB == lob, :]
         tr_current_lob = lob_triangles[lob - 1]
         nonzero_pred = ret_current_lob.groupby('AY').agg(sum)['NN_Ult']
+        nonzero_true = ret_current_lob.groupby('AY').agg(sum)['True_Ult']
+
+        tr_current_lob.loc[:, 'True_zero'] = (
+            tr_current_lob.loc[:, 'C_i,J'] - nonzero_true
+        )
 
         tr_current_lob.loc[:, 'NN_nonzero'] = nonzero_pred
+        tr_current_lob.loc[:, 'True_nonzero'] = nonzero_true
+
         tr_current_lob.loc[:, 'NN'] = (
             tr_current_lob.loc[:, ['NN_nonzero', 'NN_zero']].sum(axis=1)
         )
@@ -371,12 +406,13 @@ def main(per_batch_preproc, initialize_cl, path):
     click.echo("Total results:")
     print(pd.concat(aggregate_results, axis=1).agg(sum, axis=1))
 
-    click.echo("Charts")
-    variables = ['cc', 'age', 'LoB', 'AY', 'inj_part', 'cc']
-    for var in variables:
-        plot_by_variable(ret, var, relative=False)
-        plot_by_variable(ret, var, relative=True)
-    plt.show()
+    if present_charts:
+        click.echo("Charts:")
+        variables = ['cc', 'age', 'LoB', 'AY', 'inj_part', 'cc']
+        for var in variables:
+            plot_by_variable(ret, var, relative=False)
+            plot_by_variable(ret, var, relative=True)
+        plt.show()
 
     click.echo("Finish")
 
