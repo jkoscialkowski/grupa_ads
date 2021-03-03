@@ -272,12 +272,17 @@ def plot_by_variable(ret, variable, relative=False):
 @click.option("--clear-zero", is_flag=True)
 @click.option("--shuffle-ays", is_flag=True)
 @click.option("--transform-portfolio-in-time", is_flag=True)
+@click.option("--calc_id", default='')
 @click.argument("path")
-def main(per_batch_preproc, initialize_cl, path,
+def main(per_batch_preproc, initialize_cl, path, calc_id,
          present_charts, clear_zero, shuffle_ays, transform_portfolio_in_time):
 
     click.echo("Reading data...")
     df, development_length = read_data(path)
+    agg_writer = pd.ExcelWriter('Agg_results_' + calc_id + '.xlsx',
+                                engine='xlsxwriter')
+    notagg_writer = pd.ExcelWriter('Nonzero_results_' + calc_id + '.xlsx',
+                                   engine='xlsxwriter')
 
     if clear_zero:
         df = df[df['Pay00'] > 0]
@@ -361,10 +366,11 @@ def main(per_batch_preproc, initialize_cl, path,
     ret.drop(ret[ret.Diagonal == 0].index, inplace=True)
     ret['NN_Reserve'] = ret['NN_Ult'] - ret['Diagonal']
     ret['True_Reserve'] = ret['True_Ult'] - ret['Diagonal']
-    ret.to_csv('Nonzero_results.csv', decimal=',', sep=';')
+    ret.to_excel(notagg_writer, sheet_name='Nonzero_results')
 
     # Initializing list with aggregate results per LoB
     aggregate_results = []
+    tr_aggr = []
 
     click.echo("Combining results...")
     for lob in range(1, ret.LoB.max() + 1):
@@ -396,12 +402,20 @@ def main(per_batch_preproc, initialize_cl, path,
             tr_current_lob.loc[:, 'CL'] - tr_current_lob.loc[:, 'Diagonal']
         )
 
-        tr_current_lob.to_csv(f"triangle_lob{lob}.csv", decimal=',', sep=';')
+        tr_aggr.append(tr_current_lob)
+        tr_current_lob.to_excel(agg_writer, sheet_name=f"triangle_lob{lob}")
         print(tr_current_lob)
 
         click.echo("Results for LoB " + str(lob) + ":")
         print(tr_current_lob[['C_i,J', 'CL', 'NN']].sum())
         aggregate_results.append(tr_current_lob[['C_i,J', 'CL', 'NN']].sum())
+
+    tr_aggr_export = sum(tr_aggr)
+    tr_aggr_export.to_excel(agg_writer, sheet_name='total')
+    print(tr_aggr_export)
+
+    agg_writer.save()
+    notagg_writer.save()
 
     click.echo("Total results:")
     print(pd.concat(aggregate_results, axis=1).agg(sum, axis=1))
